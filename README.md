@@ -43,9 +43,10 @@ reg.fit(X_train, y_train)
 pred = reg.predict(X_test)
 ```
 
-The checkpoints are downloaded once and cached by `huggingface_hub`. Pass
-`model_size="tiny"` to use the smaller `hachure-ai/Lattice-tiny` checkpoints, or
-`model_path=".../cls.ckpt"` to load a local file and avoid network access.
+The checkpoints are downloaded once and cached by `huggingface_hub`, pinned to
+the `v1.0.1` revision. Pass `model_size="tiny"` to use the smaller
+`hachure-ai/Lattice-tiny` checkpoints, or `model_path=".../cls.ckpt"` to load a
+local file and avoid network access.
 
 Declare categorical columns before fitting if `X` is a NumPy array:
 

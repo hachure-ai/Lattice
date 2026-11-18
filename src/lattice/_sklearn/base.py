@@ -31,6 +31,8 @@ CHECKPOINT_REPOS = {
     "default": "hachure-ai/Lattice",
     "tiny": "hachure-ai/Lattice-tiny",
 }
+#: Released weights revision, pinned for reproducible downloads.
+CHECKPOINT_REVISION = "v1.0.1"
 
 
 def _download_checkpoint(filename: str, model_size: str = "default") -> Path:
@@ -48,8 +50,13 @@ def _download_checkpoint(filename: str, model_size: str = "default") -> Path:
             "model_path is required when huggingface_hub is not installed. "
             "Install it with `pip install huggingface_hub`, or pass model_path."
         ) from exc
-    return Path(hf_hub_download(repo_id=repo_id, filename=filename))
-
+    return Path(
+        hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            revision=CHECKPOINT_REVISION,
+        )
+    )
 
 
 def resolve_model_implementation(model_impl: str) -> tuple[str, str]:
