@@ -6,13 +6,15 @@ regression; the scikit-learn style estimators below accept NumPy arrays or
 pandas DataFrames, including mixed numeric/categorical features and missing
 values.
 
-**Checkpoints:** [hachure-ai/Lattice](https://huggingface.co/hachure-ai/Lattice)
+**Checkpoints:**
+[hachure-ai/Lattice](https://huggingface.co/hachure-ai/Lattice) (default) &middot;
+[hachure-ai/Lattice-tiny](https://huggingface.co/hachure-ai/Lattice-tiny) (tiny)
 
 ## Installation
 
 ```bash
-git clone <this-repository-url> lattice
-cd lattice
+git clone https://github.com/hachure-ai/Lattice.git
+cd Lattice
 pip install -e .
 ```
 
@@ -56,10 +58,12 @@ number of ensemble members, or `batch_size=...` to trade speed for memory.
 
 ## Checkpoints
 
-| Task | File | URL |
-| --- | --- | --- |
-| Classification | `cls.ckpt` | https://huggingface.co/hachure-ai/Lattice/blob/main/cls.ckpt |
-| Regression | `reg.ckpt` | https://huggingface.co/hachure-ai/Lattice/blob/main/reg.ckpt |
+| Size | Task | File | URL |
+| --- | --- | --- | --- |
+| `default` | Classification | `cls.ckpt` | https://huggingface.co/hachure-ai/Lattice/blob/main/cls.ckpt |
+| `default` | Regression | `reg.ckpt` | https://huggingface.co/hachure-ai/Lattice/blob/main/reg.ckpt |
+| `tiny` | Classification | `cls.ckpt` | https://huggingface.co/hachure-ai/Lattice-tiny/blob/main/cls.ckpt |
+| `tiny` | Regression | `reg.ckpt` | https://huggingface.co/hachure-ai/Lattice-tiny/blob/main/reg.ckpt |
 
 Architecture details are stored inside each checkpoint and need not be
 specified.
