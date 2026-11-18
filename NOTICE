@@ -1,0 +1,48 @@
+Lattice
+Copyright 2026 Hachure-AI
+
+Third-party notices:
+
+TabICLv2
+  Source: https://github.com/soda-inria/tabicl
+  Copyright (c) 2025, Soda team @ Inria. License: BSD 3-Clause.
+  Full terms: src/lattice/_model/LICENSE.
+
+TabPFN
+  Source: https://github.com/PriorLabs/TabPFN
+  Copyright (c) 2026 Prior Labs GmbH. License: Apache License 2.0.
+  The ECDF-rank metadata channel in src/lattice/_model/embedding.py and
+  src/lattice/_model_fourier_hybrid/embedding.py follows the TabPFN v3.5
+  design: per-cell midranks clamped to the train extremes, lifted to
+  half-period sin/cos features and added through a bias-free linear.
+
+NVIDIA structured-data-models
+  Source: https://github.com/NVIDIA/structured-data-models
+  Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  License: Apache License 2.0.
+  Numerical transform kernels, permutation formulas and the vectorized
+  Yeo-Johnson search. Full terms and the description of changes are in
+  src/lattice/_sklearn/lattice_preprocessing/LICENSE and NOTICE, with SPDX
+  headers in numerical.py and _kernels.py in that directory.
+
+scikit-learn
+  Source: https://github.com/scikit-learn/scikit-learn
+  Copyright (c) 2007-2026 The scikit-learn developers. License: BSD 3-Clause.
+  src/lattice/_sklearn/sklearn_utils.py is adapted from
+  sklearn/utils/validation.py.
+
+TabR (yandex-research/tabular-dl-tabr)
+  Source: https://github.com/yandex-research/tabular-dl-tabr
+  Copyright (c) 2023 Authors of "TabR: Unlocking the Power of
+  Retrieval-Augmented Tabular Deep Learning". License: MIT.
+  The quantile transform in src/lattice/_sklearn/preprocessing.py is adapted
+  from lib/data.py of that project.
+
+rotary-embedding-torch
+  Source: https://github.com/lucidrains/rotary-embedding-torch
+  Copyright (c) 2021 Phil Wang. License: MIT.
+  src/lattice/_model/rope.py states that its implementation is copied from
+  this project.
+
+This NOTICE is for attribution purposes only and does not alter the terms of
+any license listed above.

@@ -1,0 +1,96 @@
+[project]
+name = "lattice"
+dynamic = ["version"]
+description = "A tabular foundation model trained on synthetic data"
+authors = [
+    { name = "Si-Yang Liu" },
+]
+requires-python = ">=3.10"
+keywords = ["tabular data", "foundation model", "in-context learning"]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering",
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python",
+    'Programming Language :: Python :: 3',
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "torch>=2.4",  # base path needs F.rms_norm; Triton fast path needs exactly torch==2.7.1 + triton==3.3.1
+    "scikit-learn>=1.3.0",
+    "numpy",
+    "scipy",
+    "einops>=0.7",  # this is only used for rope, so it could be replaced
+    "psutil",  # used for memory calculation at inference
+    "tqdm>=4.64.0",
+    "huggingface-hub>=0.23",  # optional checkpoint download on first use
+]
+
+[project.optional-dependencies]
+fast = [  # exact stack validated by the Triton fast path
+    "torch==2.7.1",
+    "triton==3.3.1; sys_platform == 'linux'",
+]
+test = [
+    "pandas",
+    "pytest",
+]
+all = [
+    "lattice[test]",
+]
+
+[build-system]
+requires = ["hatchling>=1.26.1"]  # https://github.com/pypa/hatch/issues/1818
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/lattice/__about__.py"
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/lattice", "README.md", "LICENSE", "NOTICE"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lattice"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"LICENSE" = "lattice/LICENSE"
+"NOTICE" = "lattice/NOTICE"
+
+[tool.hatch.envs.default]
+installer = "uv"
+features = []
+
+[tool.hatch.envs.hatch-test]
+default-args = ["tests"]
+installer = "uv"
+features = ["test"]
+
+[tool.hatch.envs.types]
+extra-dependencies = [
+    "mypy>=1.0.0",
+]
+[tool.hatch.envs.types.scripts]
+check = "mypy --install-types --non-interactive {args:lattice tests}"
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+parallel = true
+omit = [
+    "src/lattice/__about__.py",
+]
+
+[tool.coverage.paths]
+lattice = ["src"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "no cov",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

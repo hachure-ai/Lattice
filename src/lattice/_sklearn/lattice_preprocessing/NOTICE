@@ -1,0 +1,9 @@
+Numerical kernels and recipe adapted from NVIDIA structured-data-models,
+https://github.com/NVIDIA/structured-data-models
+source revision 30564cd83796bdb66494cbb5a5b6edd2fd2b3bad.
+Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+Licensed under the Apache License, Version 2.0 (LICENSE in this directory).
+
+Changes: standalone tensor/NumPy processors replacing SDM TableTensor,
+Processor and buffer abstractions; integration with Facet ensemble inference.
+The preprocessing recipe and numerical formulas retain the upstream behavior.

@@ -1,0 +1,7 @@
+# Shell scripts must use LF line endings.
+#
+# A CRLF checked-out script makes bash parse "set -euo pipefail\r" and fail with
+# "set: pipefail: invalid option name", because the carriage return becomes part
+# of the option name. The eol=lf attribute overrides core.autocrlf on checkout,
+# so every machine gets LF regardless of its Git line-ending settings.
+*.sh text eol=lf
