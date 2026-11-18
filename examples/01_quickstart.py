@@ -25,10 +25,12 @@ def classification() -> None:
     clf.fit(X_train, y_train)
     probabilities = clf.predict_proba(X_test)
     predictions = clf.predict(X_test)
+    scores = clf.decision_function(X_test)
 
     print(f"[classification] accuracy={accuracy_score(y_test, predictions):.3f}")
     print(f"[classification] classes={clf.classes_.tolist()}")
     print(f"[classification] probabilities: {probabilities.shape}")
+    print(f"[classification] decision scores: {scores.shape}")
 
 
 def regression() -> None:

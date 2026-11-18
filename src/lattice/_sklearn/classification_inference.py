@@ -10,8 +10,13 @@ import torch
 from .adaptive_batching import predict
 
 
-def aggregate_probabilities(outputs, shuffles, *, average_logits, temperature):
-    """Undo label permutations and preserve the previous member addition order."""
+def aggregate_scores(outputs, shuffles, *, average_logits, temperature, return_logits=False):
+    """Undo label permutations and preserve the previous member addition order.
+
+    With ``return_logits`` the pre-softmax ensemble average is returned when
+    members were averaged as logits; otherwise the returned scores are
+    log-probabilities.
+    """
     average = torch.zeros_like(outputs[0], dtype=torch.float32)
     for output, shuffle in zip(outputs, shuffles, strict=True):
         if shuffle is not None:
@@ -19,13 +24,19 @@ def aggregate_probabilities(outputs, shuffles, *, average_logits, temperature):
             output = output.index_select(-1, indices)
         average.add_(output)
     average.div_(len(outputs))
-    if average_logits:
-        average = torch.softmax(average / temperature, dim=-1)
+    if not average_logits:
+        average = average / average.sum(dim=-1, keepdim=True)
+        if return_logits:
+            return torch.log(average.clamp_min(torch.finfo(average.dtype).tiny))
+        return average
+    if return_logits:
+        return average
+    average = torch.softmax(average / temperature, dim=-1)
     return average / average.sum(dim=-1, keepdim=True)
 
 
 @torch.inference_mode()
-def _predict_chunk(estimator, X):
+def _predict_chunk(estimator, X, *, return_logits=False):
     cached = estimator.model_kv_cache_ is not None
     data = estimator._ensemble_data(X, mode="test" if cached else "both")
     for key, values in data:
@@ -40,17 +51,18 @@ def _predict_chunk(estimator, X):
             cache=estimator.model_kv_cache_[key] if cached else None,
             return_tensor=True,
         )
-        probabilities = aggregate_probabilities(
+        scores = aggregate_scores(
             outputs,
             estimator.ensemble_generator_.class_shuffles_[key],
             average_logits=estimator.average_logits,
             temperature=estimator.softmax_temperature_,
+            return_logits=return_logits,
         )
-        return probabilities.cpu().numpy()
+        return scores.cpu().numpy()
     raise RuntimeError("Lattice ensemble is empty")
 
 
-def predict_lattice(estimator, X, feature_mask=None):
+def predict_lattice(estimator, X, feature_mask=None, *, return_logits=False):
     if feature_mask is not None:
         raise ValueError(
             'feature_mask is unsupported by Lattice preprocessing; use preprocessing="legacy"'
@@ -72,7 +84,9 @@ def predict_lattice(estimator, X, feature_mask=None):
     start = 0
     while start < len(X):
         try:
-            results.append(_predict_chunk(estimator, X[start : start + rows]))
+            results.append(
+                _predict_chunk(estimator, X[start : start + rows], return_logits=return_logits)
+            )
             start += rows
             continue
         except torch.cuda.OutOfMemoryError:
@@ -84,3 +98,4 @@ def predict_lattice(estimator, X, feature_mask=None):
             )
         torch.cuda.empty_cache()
     return results[0] if len(results) == 1 else np.concatenate(results, axis=0)
+

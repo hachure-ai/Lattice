@@ -58,6 +58,8 @@ More examples live in [`examples/`](examples/).
 
 Pass `device="cpu"` to force CPU inference, `n_estimators=...` to change the
 number of ensemble members, or `batch_size=...` to trade speed for memory.
+`clf.decision_function(X)` returns pre-softmax class scores (a signed 1-D score
+in the binary case) for attribution methods such as Shapley values.
 
 ## Checkpoints
 

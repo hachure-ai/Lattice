@@ -645,8 +645,14 @@ class LatticeClassifier(ClassifierMixin, LatticeBaseEstimator):
             outputs.append(np.concatenate(row_outputs, axis=1))
         return np.concatenate(outputs, axis=0)
 
-    def predict_proba(self, X: np.ndarray, *, mask_nan_features: bool = False) -> np.ndarray:
-        """Predict class probabilities for test samples.
+    def _predict_arrays(
+        self,
+        X: np.ndarray,
+        *,
+        mask_nan_features: bool = False,
+        return_logits: bool = False,
+    ) -> np.ndarray:
+        """Aggregate ensemble outputs as probabilities or decision scores.
 
         Applies the ensemble of LatticeModel models to make predictions, with each ensemble
         member providing predictions that are then averaged. The method:
@@ -668,10 +674,13 @@ class LatticeClassifier(ClassifierMixin, LatticeBaseEstimator):
             SHAP explanations. Only supported by the legacy ensemble generator
             (without asinh or SVD branches). Leave False for ordinary prediction.
 
+        return_logits : bool, default=False
+            Return pre-softmax (or log-probability) scores instead of probabilities.
+
         Returns
         -------
         np.ndarray of shape (n_samples, n_classes)
-            Class probabilities for each test sample.
+            Class probabilities, or decision scores when ``return_logits`` is set.
         """
         check_is_fitted(self)
         self._move_cache_to_device(for_inference=True)
@@ -742,7 +751,7 @@ class LatticeClassifier(ClassifierMixin, LatticeBaseEstimator):
             from .classification_inference import predict_lattice
 
             try:
-                return predict_lattice(self, X, feature_mask)
+                return predict_lattice(self, X, feature_mask, return_logits=return_logits)
             finally:
                 if self.n_jobs is not None:
                     torch.set_num_threads(old_n_threads)
@@ -794,15 +803,77 @@ class LatticeClassifier(ClassifierMixin, LatticeBaseEstimator):
         # Calculate ensemble average
         avg /= n_estimators
 
-        # Convert logits to probabilities
         if self.average_logits:
-            avg = self.softmax(avg, axis=-1, temperature=getattr(self, "softmax_temperature_", self.softmax_temperature))
+            if return_logits:
+                result = avg
+            else:
+                avg = self.softmax(avg, axis=-1, temperature=getattr(self, "softmax_temperature_", self.softmax_temperature))
+                result = avg / avg.sum(axis=1, keepdims=True)
+        else:
+            result = avg / avg.sum(axis=1, keepdims=True)
+            if return_logits:
+                result = np.log(np.clip(result, np.finfo(result.dtype).tiny, None))
 
         if self.n_jobs is not None:
             torch.set_num_threads(old_n_threads)
 
-        # Normalize probabilities
-        return avg / avg.sum(axis=1, keepdims=True)
+        return result
+
+    def predict_proba(self, X: np.ndarray, *, mask_nan_features: bool = False) -> np.ndarray:
+        """Predict class probabilities for test samples.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Test samples for prediction. Missing values, including entirely
+            missing query columns, use the fitted encoder's missing-value handling.
+
+        mask_nan_features : bool, default=False
+            Explicitly interpret all-NaN query columns as absent features for
+            SHAP explanations. Only supported by the legacy ensemble generator
+            (without asinh or SVD branches). Leave False for ordinary prediction.
+
+        Returns
+        -------
+        np.ndarray of shape (n_samples, n_classes)
+            Class probabilities for each test sample.
+        """
+        return self._predict_arrays(X, mask_nan_features=mask_nan_features)
+
+    def decision_function(self, X: np.ndarray, *, mask_nan_features: bool = False) -> np.ndarray:
+        """Compute class decision scores for test samples.
+
+        Follows the scikit-learn convention: binary problems return a signed
+        1-D score (positive values favour ``classes_[1]``), while problems with
+        more classes return an array of shape ``(n_samples, n_classes)`` ordered
+        like ``classes_``. Scores are the ensemble-averaged logits before the
+        softmax when ``average_logits=True`` (the default); if members are
+        averaged on the probability scale instead, log-probabilities are
+        returned. This unbounded scale is useful for attribution methods such
+        as Shapley values.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Test samples for prediction. Missing values, including entirely
+            missing query columns, use the fitted encoder's missing-value handling.
+
+        mask_nan_features : bool, default=False
+            Explicitly interpret all-NaN query columns as absent features for
+            SHAP explanations. Only supported by the legacy ensemble generator
+            (without asinh or SVD branches). Leave False for ordinary prediction.
+
+        Returns
+        -------
+        np.ndarray of shape (n_samples,) or (n_samples, n_classes)
+            Decision scores ordered like ``classes_``.
+        """
+        scores = self._predict_arrays(
+            X, mask_nan_features=mask_nan_features, return_logits=True
+        )
+        if scores.shape[1] == 2:
+            return scores[:, 1] - scores[:, 0]
+        return scores
 
     def predict(self, X: np.ndarray, *, mask_nan_features: bool = False) -> np.ndarray:
         """Predict class labels for test samples.
