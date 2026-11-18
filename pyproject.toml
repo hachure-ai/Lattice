@@ -2,6 +2,8 @@
 name = "lattice"
 dynamic = ["version"]
 description = "A tabular foundation model trained on synthetic data"
+readme = "README.md"
+license = { text = "Apache-2.0" }
 authors = [
     { name = "Si-Yang Liu" },
 ]
@@ -30,6 +32,10 @@ dependencies = [
     "tqdm>=4.64.0",
     "huggingface-hub>=0.23",  # optional checkpoint download on first use
 ]
+
+[project.urls]
+Repository = "https://github.com/hachure-ai/Lattice"
+Checkpoints = "https://huggingface.co/hachure-ai/Lattice"
 
 [project.optional-dependencies]
 fast = [  # exact stack validated by the Triton fast path
