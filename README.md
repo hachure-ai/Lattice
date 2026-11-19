@@ -1,5 +1,7 @@
 # Lattice
 
+Developed by **Hachure-AI & Nanjing University**.
+
 Lattice is a tabular foundation model that makes predictions in context, without
 any fine-tuning. A single frozen model handles both classification and
 regression; the scikit-learn style estimators below accept NumPy arrays or

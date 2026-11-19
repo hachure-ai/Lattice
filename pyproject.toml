@@ -6,6 +6,8 @@ readme = "README.md"
 license = { text = "Apache-2.0" }
 authors = [
     { name = "Si-Yang Liu" },
+    { name = "Hachure-AI" },
+    { name = "Nanjing University" },
 ]
 requires-python = ">=3.10"
 keywords = ["tabular data", "foundation model", "in-context learning"]
