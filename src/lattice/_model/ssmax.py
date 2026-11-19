@@ -150,6 +150,9 @@ class QASSMaxMLP(nn.Module):
         different scaling for each element in the head dimension.
     """
 
+    # Fast inference can give the QASSMax layers of one model a common length cache.
+    _logn = staticmethod(_logn)
+
     def __init__(self, num_heads: int, head_dim: int, n_hidden: int = 64, elementwise: bool = False):
         super().__init__()
         self.num_heads = num_heads
@@ -186,7 +189,7 @@ class QASSMaxMLP(nn.Module):
         torch.Tensor
             Scaled query tensor, same shape as ``q``.
         """
-        logn = _logn(n, q.device, q.dtype).reshape(1, 1)
+        logn = self._logn(n, q.device, q.dtype).reshape(1, 1)
 
         if self.elementwise:
             # base_scales: (1, num_heads * head_dim) -> (1, num_heads, 1, head_dim)
@@ -199,96 +202,6 @@ class QASSMaxMLP(nn.Module):
         scales = base_scales * modulation
 
         return q * scales
-
-
-class LogScale(nn.Module):
-    """Logarithmic query scaling (SDM-style, ``sdm/nn/scaling.py``).
-
-    Applies scaling to queries:
-    :math:`q_{\\text{scaled}} = q \\cdot (a_h \\cdot \\log n)`,
-    where :math:`a_h` is a learnable per-head coefficient initialized
-    uniformly in ``[0, 1)``. Mathematically identical to :class:`SSMax`
-    except for the initialization (SSMax initializes to 1.0).
-
-    Parameters
-    ----------
-    num_heads : int
-        Number of attention heads.
-    """
-
-    def __init__(self, num_heads: int):
-        super().__init__()
-        self.scales = nn.Parameter(torch.rand(num_heads))
-
-    def forward(self, q: torch.Tensor, n: int) -> torch.Tensor:
-        """Apply LogScale scaling to queries.
-
-        Parameters
-        ----------
-        q : torch.Tensor
-            Query tensor after projection, shape ``(bs, n_heads, seq_len, head_dim)``.
-        n : int
-            Source sequence length.
-
-        Returns
-        -------
-        torch.Tensor
-            Scaled query tensor, same shape as ``q``.
-        """
-        logn = _logn(n, q.device, q.dtype)
-        scales = self.scales.view(1, -1, 1, 1) * logn
-        return q * scales
-
-
-class GatedLogScale(nn.Module):
-    """Gated logarithmic query scaling (SDM-style, ``sdm/nn/scaling.py``).
-
-    Applies scaling to queries:
-    :math:`q_{\\text{scaled}} = q \\cdot (a_h \\cdot \\log n) \\cdot (1 + \\tanh(g(q)))`,
-    where :math:`a_h` is a learnable per-head coefficient initialized uniformly
-    in ``[0, 1)`` and :math:`g` is a per-channel gate MLP whose last layer is
-    zero-initialized (so the gate starts as the identity). Equivalent to
-    :class:`QASSMaxMLP` with ``elementwise=True`` where the base MLP over
-    :math:`\\log n` is replaced by the analytic form :math:`a_h \\cdot \\log n`.
-
-    Parameters
-    ----------
-    num_heads : int
-        Number of attention heads.
-    head_dim : int
-        Dimension of each attention head.
-    n_hidden : int, default=64
-        Number of hidden units in the gate MLP.
-    """
-
-    def __init__(self, num_heads: int, head_dim: int, n_hidden: int = 64):
-        super().__init__()
-        self.scales = nn.Parameter(torch.rand(num_heads))
-        self.gate = nn.Sequential(nn.Linear(head_dim, n_hidden), nn.GELU(), nn.Linear(n_hidden, head_dim))
-
-        # ensures the gate starts as the identity
-        nn.init.zeros_(self.gate[-1].weight)
-        nn.init.zeros_(self.gate[-1].bias)
-
-    def forward(self, q: torch.Tensor, n: int) -> torch.Tensor:
-        """Apply GatedLogScale scaling to queries.
-
-        Parameters
-        ----------
-        q : torch.Tensor
-            Query tensor after projection, shape ``(bs, n_heads, seq_len, head_dim)``.
-        n : int
-            Source sequence length.
-
-        Returns
-        -------
-        torch.Tensor
-            Scaled query tensor, same shape as ``q``.
-        """
-        logn = _logn(n, q.device, q.dtype)
-        scales = self.scales.view(1, -1, 1, 1) * logn
-        modulation = 1 + torch.tanh(self.gate(q))  # (bs, n_heads, seq_len, head_dim)
-        return q * scales * modulation
 
 
 def create_ssmax_layer(ssmax_type: str, num_heads: int, embed_dim: int):
@@ -306,9 +219,5 @@ def create_ssmax_layer(ssmax_type: str, num_heads: int, embed_dim: int):
         return QASSMaxMLP(num_heads, embed_dim // num_heads)
     elif ssmax_type == "qassmax-mlp-elementwise":
         return QASSMaxMLP(num_heads, embed_dim // num_heads, elementwise=True)
-    elif ssmax_type == "logscale":
-        return LogScale(num_heads)
-    elif ssmax_type == "gated-logscale":
-        return GatedLogScale(num_heads, embed_dim // num_heads)
     else:
         raise ValueError(f"Unknown {ssmax_type=}")

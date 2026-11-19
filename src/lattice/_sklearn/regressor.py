@@ -97,10 +97,12 @@ class LatticeRegressor(RegressorMixin, LatticeBaseEstimator):
         loaded or stored on CPU, its dtype is preserved. Actual CPU prediction
         or CUDA prediction without AMP upcasts it to float32 before execution.
 
-    kv_cache_device : {"auto", "cpu"}, default="cpu"
-        With ``batch_size="auto"`` on CUDA, keep KV in pinned CPU memory and
-        asynchronously stage member batches. Opt into ``"auto"`` to keep KV
-        on GPU when it fits the residency budget. Loading defers promotion to predict.
+    kv_cache_device : {"auto", "cpu"}, default="auto"
+        With ``batch_size="auto"`` on CUDA, ``"auto"`` keeps KV on the GPU when
+        it fits the residency budget (a quarter of the reclaimable memory) and
+        otherwise in pinned CPU memory, staged per member batch. ``"cpu"``
+        always stages from host memory, which is slower on small tables.
+        Loading defers promotion to predict.
 
     model_path : str | Path, optional
         Path to a local checkpoint file. If omitted, ``reg.ckpt`` is downloaded
@@ -281,7 +283,7 @@ class LatticeRegressor(RegressorMixin, LatticeBaseEstimator):
         ensemble_mode: str = "global",
         categorical_indices: Optional[List[int]] = None,
         preprocessing: str = "auto",
-        kv_cache_device: str = "cpu",
+        kv_cache_device: str = "auto",
     ):
         self.n_estimators = n_estimators
         self.norm_methods = norm_methods

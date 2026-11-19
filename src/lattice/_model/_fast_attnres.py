@@ -6,6 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .kv_cache import KVCacheEntry
+
 
 KEYS_ROWS_THRESHOLD = 2048
 SCORE_ROWS = 4
@@ -229,24 +231,17 @@ def fused_mix(slab, p, count, row_stride, dtype):
     return out
 
 
-def fast_encoder_forward(self, src, train_size=None, idempotency_loop_counts=None,
-                         return_last_attn=False):
-    """Reuse FP32 attention-residual statistics across ICL scorers."""
+def _fused_attn_res_stack(self, src, attention):
+    """Shared FP32 attention-residual loop of the fused encoder paths.
+
+    ``attention(layer_idx, block, hidden_states)`` returns one layer's attention
+    output. The uncached encoder and the KV-cached one differ only in that call,
+    so both run this loop instead of repeating the residual bank.
+    """
     blocks = self.blocks
     B, T, D = src.shape
     slots = len(blocks) + 2
     rows = B * T
-    if (
-        not src.is_cuda or D not in (256, 512) or not rows
-        or rows * slots * D >= 2**31
-        or idempotency_loop_counts is not None or return_last_attn
-        or not _bank_fits(rows, slots, D, src.device)
-    ):
-        return type(self).forward(
-            self, src, train_size=train_size,
-            idempotency_loop_counts=idempotency_loop_counts,
-            return_last_attn=return_last_attn,
-        )
 
     N, INV = D // 128, 1.0 / D
     fuse = rows > KEYS_ROWS_THRESHOLD
@@ -336,9 +331,7 @@ def fast_encoder_forward(self, src, train_size=None, idempotency_loop_counts=Non
             filled += 1
             prefix_sum = None
         hidden_states = block.norm1(hidden_states)
-        key_value_states = hidden_states if train_size is None else hidden_states[..., :train_size, :]
-        attention_output = block._attn_block(hidden_states, key_value_states, key_value_states,
-                                             rope=self.rope)
+        attention_output = attention(layer_idx, block, hidden_states)
         attention_output = block.post_attn_norm(attention_output)
         prefix_sum = attention_output if prefix_sum is None else prefix_sum + attention_output
         stage(filled, prefix_sum)
@@ -347,3 +340,71 @@ def fast_encoder_forward(self, src, train_size=None, idempotency_loop_counts=Non
         prefix_sum = prefix_sum + block.post_ff_norm(mlp_output)
     stage(filled, prefix_sum)
     return mix(self.output_attn_res, filled + 1)
+
+
+def fast_encoder_forward(self, src, train_size=None, idempotency_loop_counts=None,
+                         return_last_attn=False):
+    """Reuse FP32 attention-residual statistics across ICL scorers."""
+    blocks = self.blocks
+    B, T, D = src.shape
+    slots = len(blocks) + 2
+    rows = B * T
+    if (
+        not src.is_cuda or D not in (256, 512) or not rows
+        or rows * slots * D >= 2**31
+        or idempotency_loop_counts is not None or return_last_attn
+        or not _bank_fits(rows, slots, D, src.device)
+    ):
+        return type(self).forward(
+            self, src, train_size=train_size,
+            idempotency_loop_counts=idempotency_loop_counts,
+            return_last_attn=return_last_attn,
+        )
+
+    def attention(layer_idx, block, hidden_states):
+        key_value_states = hidden_states if train_size is None else hidden_states[..., :train_size, :]
+        return block._attn_block(hidden_states, key_value_states, key_value_states, rope=self.rope)
+
+    return _fused_attn_res_stack(self, src, attention)
+
+
+def fast_encoder_forward_with_cache(self, src, icl_cache, train_size=None,
+                                    use_cache=False, store_cache=True, *, cache_only=False):
+    """Reuse FP32 attention-residual statistics in the KV-cached encoder paths.
+
+    ``store_cache`` publishes one K/V entry per ICL layer from the same pass that
+    computes the residuals; ``use_cache`` attends to the stored entries for the
+    query rows. ``cache_only`` (a support pass that only fills the cache) keeps
+    the eager implementation.
+    """
+    if use_cache == store_cache:
+        raise ValueError("Exactly one of use_cache or store_cache must be True")
+    if store_cache and train_size is None:
+        raise ValueError("train_size must be provided when store_cache=True")
+
+    blocks = self.blocks
+    B, T, D = src.shape
+    slots = len(blocks) + 2
+    rows = B * T
+    if (
+        not src.is_cuda or D not in (256, 512) or not rows
+        or rows * slots * D >= 2**31
+        or cache_only
+        or not _bank_fits(rows, slots, D, src.device)
+    ):
+        return type(self).forward_with_cache(
+            self, src, icl_cache, train_size=train_size,
+            use_cache=use_cache, store_cache=store_cache, cache_only=cache_only,
+        )
+
+    def attention(layer_idx, block, hidden_states):
+        if use_cache:
+            return block._attn_block(hidden_states, cached_kv=icl_cache.kv[layer_idx], rope=self.rope)
+        support = hidden_states[..., :train_size, :]
+        output, key, value = block._attn_block(
+            hidden_states, support, support, rope=self.rope, need_kv=True,
+        )
+        icl_cache.kv[layer_idx] = KVCacheEntry(key=key, value=value)
+        return output
+
+    return _fused_attn_res_stack(self, src, attention)

@@ -123,6 +123,11 @@ class InterleavedRowInteraction(nn.Module):
         self.num_blocks = len(col_blocks)
         self.recompute = recompute
 
+    @property
+    def _attention_rope(self):
+        # The fused QK norms apply the rotation; keep rope registered for saving.
+        return None if getattr(self, "_use_fused_rope", False) else self.rope
+
     def _column_pass(
         self, features: Tensor, train_size: Optional[int], index: int
     ) -> Tensor:
@@ -219,10 +224,10 @@ class InterleavedRowInteraction(nn.Module):
             tokens = torch.cat((cls, features), dim=2)  # (B, T, C+G, E)
             if last:
                 return (
-                    block(q=cls, k=tokens, v=tokens, key_padding_mask=key_mask, rope=self.rope),
+                    block(q=cls, k=tokens, v=tokens, key_padding_mask=key_mask, rope=self._attention_rope),
                     features,
                 )
-            tokens = block(tokens, key_padding_mask=key_mask, rope=self.rope)
+            tokens = block(tokens, key_padding_mask=key_mask, rope=self._attention_rope)
             return tokens[..., : self.num_cls, :], tokens[..., self.num_cls :, :]
 
         for t0 in range(0, T, step):
@@ -233,10 +238,10 @@ class InterleavedRowInteraction(nn.Module):
             tokens = torch.cat((cls_chunk, feat_chunk), dim=2)
             if last:
                 cls[:, t0:t1] = block(
-                    q=cls_chunk, k=tokens, v=tokens, key_padding_mask=mask, rope=self.rope
+                    q=cls_chunk, k=tokens, v=tokens, key_padding_mask=mask, rope=self._attention_rope
                 )
             else:
-                out = block(tokens, key_padding_mask=mask, rope=self.rope)
+                out = block(tokens, key_padding_mask=mask, rope=self._attention_rope)
                 cls[:, t0:t1] = out[..., : self.num_cls, :]
                 feat_chunk.copy_(out[..., self.num_cls :, :])
                 del out
@@ -254,7 +259,7 @@ class InterleavedRowInteraction(nn.Module):
         """One full interleaved round; the class tokens keep evolving."""
         features = self._column_pass(features, train_size, index)
         x = torch.cat((cls, features), dim=2)  # (B, T, C+G, E)
-        x = self.row_blocks[index](x, key_padding_mask=key_mask, rope=self.rope)
+        x = self.row_blocks[index](x, key_padding_mask=key_mask, rope=self._attention_rope)
         return x[..., : self.num_cls, :], x[..., self.num_cls :, :]
 
     def _final_round(
@@ -269,7 +274,7 @@ class InterleavedRowInteraction(nn.Module):
         features = self._column_pass(features, train_size, index)
         x = torch.cat((cls, features), dim=2)  # (B, T, C+G, E)
         return self.row_blocks[index](
-            q=cls, k=x, v=x, key_padding_mask=key_mask, rope=self.rope
+            q=cls, k=x, v=x, key_padding_mask=key_mask, rope=self._attention_rope
         )
 
     def forward(
@@ -372,8 +377,8 @@ class InterleavedRowInteraction(nn.Module):
             ).transpose(1, 2)
             tokens = torch.cat((cls, features), dim=2)
             if i == self.num_blocks - 1:
-                cls = row(q=cls, k=tokens, v=tokens, rope=self.rope)
+                cls = row(q=cls, k=tokens, v=tokens, rope=self._attention_rope)
             else:
-                tokens = row(tokens, rope=self.rope)
+                tokens = row(tokens, rope=self._attention_rope)
                 cls, features = tokens[..., :self.num_cls, :], tokens[..., self.num_cls:, :]
         return self.out_ln(cls).flatten(-2)

@@ -244,10 +244,6 @@ class RotaryEmbedding(nn.Module):
 
         self.learned_freq = learned_freq
 
-        # dummy for device
-
-        self.tmp_store("dummy", torch.tensor(0))
-
         # default sequence dimension
 
         self.seq_before_head_dim = seq_before_head_dim
@@ -278,7 +274,7 @@ class RotaryEmbedding(nn.Module):
 
     @property
     def device(self):
-        return self.dummy.device
+        return self.freqs.device
 
     def tmp_store(self, key, value):
         self.register_buffer(key, value, persistent=False)

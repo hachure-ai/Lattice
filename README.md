@@ -22,11 +22,20 @@ Python >= 3.10 and PyTorch >= 2.4 are required (`F.rms_norm` needs 2.4). A CUDA
 GPU is strongly recommended; CPU inference works but is much slower.
 
 The optional accelerators are stricter and fall back silently when unmet: the
-Triton fast path needs exactly `torch==2.7.1` and `triton==3.3.1` with the KV
-cache off; Flash Attention 3 needs a Hopper GPU (sm90), CUDA >= 12.3 and a
+Triton fast path needs exactly `torch==2.7.1` and `triton==3.3.1`; Flash
+Attention 3 needs a Hopper GPU (sm90), CUDA >= 12.3 and a
 `flash_attn_interface` built from the `hopper/` sources of FlashAttention.
 
 `pip install -e ".[fast]"` installs the validated Triton stack.
+
+Environment variables that control the accelerators (all optional):
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `LATTICE_FASTPATH` | `auto` | `0`/`off` disables the Triton QK + ICL kernels entirely; `auto` installs them when the version gate above holds. |
+| `LATTICE_FASTPATH_KV` | `1` | `0`/`off` keeps a KV-cached fit on the eager encoder. By default a cached fit installs the encoder kernel only: the QK/RoPE rewiring belongs to the uncached path. |
+| `LATTICE_FUSED` | `0` | `1` additionally fuses LayerNorm, RMSNorm and SwiGLU. Off by default because the fused kernels need a device self-test at install time. |
+| `LATTICE_TEST_CHUNK_CELLS` | `2000000` | Cell budget (`rows x features`) of one cached test forward, the main prediction-time memory knob. |
 
 ## Quick start
 
@@ -58,6 +67,14 @@ More examples live in [`examples/`](examples/).
 
 Pass `device="cpu"` to force CPU inference, `n_estimators=...` to change the
 number of ensemble members, or `batch_size=...` to trade speed for memory.
+`batch_size` defaults to `8`; `"auto"` picks a batch per call and retries
+smaller ones on OOM. The choice also decides where a KV cache lives: a fixed
+integer keeps it on the device, while `"auto"` follows `kv_cache_device`
+(`"auto"` by default, which promotes the cache to the GPU when it fits a
+quarter of the reclaimable memory and keeps it in pinned host memory
+otherwise). A resident cache is roughly twice as fast for cached prediction
+on small test sets; the host fallback is the safety net for tables whose cache
+does not fit.
 `clf.decision_function(X)` returns pre-softmax class scores (a signed 1-D score
 in the binary case) for attribution methods such as Shapley values.
 

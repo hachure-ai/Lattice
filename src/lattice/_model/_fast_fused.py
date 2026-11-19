@@ -168,7 +168,7 @@ def fused_swiglu_forward(self, x):
     return self.w_down(self.dropout(out))
 
 
-def install_fused(model, encoder, row_norms) -> bool:
+def install_fused(model, encoder, row_norms, replace) -> bool:
     """Patch supported modules with the fused kernels.
 
     ``row_norms`` are the row QK norms already handled by the RoPE/QK fastpath;
@@ -189,13 +189,13 @@ def install_fused(model, encoder, row_norms) -> bool:
     use_rms = _enabled("rms")
     for module in model.modules():
         if isinstance(module, torch.nn.LayerNorm) and use_ln:
-            module.forward = MethodType(fused_layer_norm_forward, module)
+            replace(module, "forward", MethodType(fused_layer_norm_forward, module))
             norm_modules.append(module)
         elif isinstance(module, SwiGLU) and use_swiglu:
-            module.forward = MethodType(fused_swiglu_forward, module)
+            replace(module, "forward", MethodType(fused_swiglu_forward, module))
             norm_modules.append(module)
     for module in encoder.modules():
         if isinstance(module, QKRMSNorm) and module not in row_norms and use_rms:
-            module.forward = MethodType(fused_rms_norm_forward, module)
+            replace(module, "forward", MethodType(fused_rms_norm_forward, module))
             norm_modules.append(module)
     return bool(norm_modules)

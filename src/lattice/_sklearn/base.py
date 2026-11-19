@@ -6,7 +6,6 @@ import copy
 import pickle
 import warnings
 import contextlib
-from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
 from typing import Optional
@@ -75,55 +74,6 @@ def resolve_model_implementation(model_impl: str) -> tuple[str, str]:
             f"Unknown checkpoint model_impl={model_impl!r}. Supported inference "
             f"architectures are: {supported}"
         ) from exc
-
-
-@contextmanager
-def _skip_weight_init():
-    """Build a module tree without initialising its weights.
-
-    ``nn.Linear`` and ``nn.MultiheadAttention`` run kaiming/xavier initialisation
-    in their constructors. When a checkpoint is loaded right after construction
-    that work is discarded, yet on a 37M-parameter model it accounts for ~90% of
-    the build time (measured: 0.99 s of 1.13 s, 1237 ``uniform_`` calls).
-    """
-    import torch.nn as nn
-    import torch.nn.init as init_
-
-    names = (
-        "uniform_",
-        "normal_",
-        "trunc_normal_",
-        "kaiming_uniform_",
-        "kaiming_normal_",
-        "xavier_uniform_",
-        "xavier_normal_",
-    )
-    # ``nn.init`` and ``torch.nn`` expose the same callables under separate
-    # module attributes; ``nn.MultiheadAttention`` resolves through the latter.
-    modules = [init_] + ([nn] if all(hasattr(nn, name) for name in names) else [])
-    # ``torch.nn.modules.activation`` imports the initialisers by name, so its
-    # module-level bindings have to be patched as well.
-    try:
-        from torch.nn.modules import activation as _act
-
-        for name in ("xavier_uniform_", "xavier_normal_"):
-            if hasattr(_act, name):
-                modules.append(_act)
-        names = names + ("xavier_uniform_", "xavier_normal_")
-    except ImportError:  # pragma: no cover
-        pass
-    saved = [(mod, name, getattr(mod, name)) for mod in modules for name in names if hasattr(mod, name)]
-
-    def _noop(tensor, *args, **kwargs):
-        return tensor
-
-    for mod, name, _ in saved:
-        setattr(mod, name, _noop)
-    try:
-        yield
-    finally:
-        for mod, name, fn in saved:
-            setattr(mod, name, fn)
 
 
 #: Checkpoints already copied to a device, keyed by (path, mtime, device). A
@@ -307,33 +257,56 @@ class LatticeBaseEstimator(BaseEstimator):
         a fixed integer batch (or ``None``) both use it when the KV cache is
         off. Large tables fall back to the original encoder inside
         :func:`fast_encoder_forward` when the fp32 residual bank would not fit.
+
+        The kernels live on the network, which may be shared with other
+        estimators or reused from an earlier fit, so the decision is applied to
+        whatever is installed there: a configuration that no longer holds (the
+        fit moved device, AMP changed with the table size, or the environment
+        switched the fastpath off) is removed instead of being left in place.
         """
         self.fastpath_enabled_ = False
-        if os.environ.get("LATTICE_FASTPATH", "auto").lower() in {"0", "off", "false", "disabled"}:
-            return False
-        if getattr(self, "device_", None) is None or self.device_.type != "cuda":
-            return False
-        if self.kv_cache:
+        try:
+            from lattice._model import fastpath
+        except ImportError:
             return False
 
-        use_amp = self._use_amp_resolved
-        if use_amp and n_rows < self.fastpath_min_rows:
+        use_amp = getattr(self, "_use_amp_resolved", False)
+        # A KV-cached fit builds and serves on ``forward_with_cache``, so it gets
+        # the encoder kernel only; the QK/RoPE rewiring belongs to the uncached
+        # path. ``LATTICE_FASTPATH_KV=0`` opts a cached fit out of the extension.
+        kv = bool(self.kv_cache) and os.environ.get("LATTICE_FASTPATH_KV", "1").lower() not in {
+            "0", "off", "false", "disabled",
+        }
+        selected = (
+            os.environ.get("LATTICE_FASTPATH", "auto").lower() not in {"0", "off", "false", "disabled"}
+            and getattr(self, "device_", None) is not None
+            and self.device_.type == "cuda"
+            # A cached fit has no use for the uncached encoders.
+            and (kv or not self.kv_cache)
+            and (kv or not (use_amp and n_rows < self.fastpath_min_rows))
+        )
+        if not selected:
+            if getattr(self, "model_", None) is not None:
+                fastpath.uninstall(self.model_)
             return False
 
         try:
-            from lattice._model import fastpath
-
             with torch.no_grad():
-                self.fastpath_enabled_ = fastpath.install(self.model_, fuse_qk=use_amp)
-        except (ImportError, RuntimeError):
+                self.fastpath_enabled_ = fastpath.install(
+                    self.model_, fuse_qk=use_amp and not kv, allow_kv_cache=kv,
+                )
+        except RuntimeError:
             return False
         return self.fastpath_enabled_
 
     def _make_model(self):
         model_impl = getattr(self, "model_impl_", "lattice_fourier_hybrid_attn-res-interleave")
-        with _skip_weight_init():
-            module, name = resolve_model_implementation(model_impl)
-            return getattr(import_module(f"lattice.{module}"), name)(**self.model_config_)
+        module, name = resolve_model_implementation(model_impl)
+        model_cls = getattr(import_module(f"lattice.{module}"), name)
+        # Only this construction uses placeholder tensors. The checkpoint
+        # supplies their storage through load_state_dict(assign=True).
+        with torch.device("meta"):
+            return model_cls(**self.model_config_)
 
     def _use_lattice_preprocessing(self):
         mode = getattr(self, "preprocessing", "auto")
@@ -606,6 +579,9 @@ class LatticeBaseEstimator(BaseEstimator):
         if hasattr(self, "model_"):
             self.model_.to(self.device_)
             self._build_inference_config()
+            # The install records the device, so kernels bound to the old one (and
+            # their device-local caches) are replaced instead of carried over.
+            self._maybe_install_fastpath(getattr(self, "n_samples_in_", 0))
             for name in ("COL_CONFIG", "ROW_CONFIG", "ICL_CONFIG"):
                 getattr(self.inference_config_, name).device = self.device_
             self._move_cache_to_device()
@@ -810,6 +786,7 @@ class LatticeBaseEstimator(BaseEstimator):
 
         # Reconstruct inference config
         self._build_inference_config()
+        self._maybe_install_fastpath(getattr(self, "n_samples_in_", 0))
 
         # Move KV cache to device, auto-upcasting if needed
         self._move_cache_to_device()

@@ -1518,11 +1518,13 @@ class QuantileToDistribution(nn.Module):
         self.fix_crossing = fix_crossing
         self.crossing_method = crossing_method
 
-        # Register alpha levels as buffer
+        # A constant table, moved to the query's device in ``forward``. Built on the
+        # CPU so it keeps its values when the model is constructed on the meta
+        # device and materialised by the checkpoint (it is not saved in one).
         if alpha_levels is None:
-            self.alpha_levels = torch.linspace(0.0, 1.0, num_quantiles + 2)[1:-1]
+            self.alpha_levels = torch.linspace(0.0, 1.0, num_quantiles + 2, device="cpu")[1:-1]
         else:
-            self.alpha_levels = torch.tensor(alpha_levels)
+            self.alpha_levels = torch.tensor(alpha_levels, device="cpu")
 
     def forward(self, quantiles: Tensor) -> QuantileDistribution:
         """Convert predicted quantiles to distribution.
