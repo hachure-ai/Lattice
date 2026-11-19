@@ -120,8 +120,8 @@ def score512(bank, rstd, w, out, slots, count, rows, D: tl.constexpr, R: tl.cons
     keeps its two separate roundings. `R` rows share one program so the tiny
     per-source reductions do not drown in launch/scheduling overhead.
     """
-    k = tl.program_id(0)
-    bt = tl.program_id(1) * R + tl.arange(0, R)
+    k = tl.program_id(1)
+    bt = tl.program_id(0) * R + tl.arange(0, R)
     valid = bt < rows
     lane = tl.arange(0, 128)
     bip = bank + (bt * slots * D + k * D)[:, None] + lane[None, :]
@@ -148,8 +148,8 @@ def score512_pair(bank, rstd, w0, w1, out0, out1, slots, count, rows,
     the first one for slot count-1 (the second one is finished by `write_slot`
     once that slot holds its final value).
     """
-    k = tl.program_id(0)
-    bt = tl.program_id(1) * R + tl.arange(0, R)
+    k = tl.program_id(1)
+    bt = tl.program_id(0) * R + tl.arange(0, R)
     valid = bt < rows
     lane = tl.arange(0, 128)
     bip = bank + (bt * slots * D + k * D)[:, None] + lane[None, :]
@@ -299,12 +299,14 @@ def _fused_attn_res_stack(self, src, attention):
                 scores = torch.empty((B, T, count), device=src.device, dtype=torch.float32)
                 w2 = weight(nxt)
                 other = torch.empty_like(scores)
-                score512_pair[(count, triton.cdiv(rows, PAIR_ROWS))](
+                # CUDA grid dimension 1 is limited to 65,535 blocks. Put the
+                # row axis in dimension 0, which supports much larger grids.
+                score512_pair[(triton.cdiv(rows, PAIR_ROWS), count)](
                     bank, rstd, w, w2, scores, other, slots, count, rows, D, PAIR_ROWS, N)
                 pending = [nxt, w2, other, count, False]
             else:
                 scores = torch.empty((B, T, count), device=src.device, dtype=torch.float32)
-                score512[(count, triton.cdiv(rows, SCORE_ROWS))](
+                score512[(triton.cdiv(rows, SCORE_ROWS), count)](
                     bank, rstd, w, scores, slots, count, rows, D, SCORE_ROWS, N)
         probabilities = scores.softmax(dim=-1) if module.use_softmax else scores.exp()
         if fuse:
