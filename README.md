@@ -59,6 +59,11 @@ the `v1.0.1` revision. Pass `model_size="tiny"` to use the smaller
 `hachure-ai/Lattice-tiny` checkpoints, or `model_path=".../cls.ckpt"` to load a
 local file and avoid network access.
 
+When fetching a Hub checkpoint, Lattice also requests `config.json` so the Hub
+can count the request. These counts include HTTP HEAD requests and are not
+unique users or guaranteed completed checkpoint downloads. Older Lattice
+versions, direct checkpoint downloads, and local files may not be counted.
+
 Declare categorical columns before fitting if `X` is a NumPy array:
 
 ```python

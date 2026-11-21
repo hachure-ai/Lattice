@@ -49,6 +49,12 @@ def _download_checkpoint(filename: str, model_size: str = "default") -> Path:
             "model_path is required when huggingface_hub is not installed. "
             "Install it with `pip install huggingface_hub`, or pass model_path."
         ) from exc
+    # The Hub counts requests for config.json. This metadata is optional and
+    # must not prevent loading a cached checkpoint when the Hub is unavailable.
+    try:
+        hf_hub_download(repo_id=repo_id, filename="config.json", revision="main")
+    except Exception:
+        pass
     return Path(
         hf_hub_download(
             repo_id=repo_id,
