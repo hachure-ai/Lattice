@@ -6,6 +6,7 @@ import torch
 import triton
 import triton.language as tl
 
+from ._fast_norm214 import HAS_FUSED_RMS_NORM
 from .kv_cache import KVCacheEntry
 
 
@@ -40,19 +41,25 @@ def _add_rn(a, b):
 
 
 @triton.jit
-def _tree512(acc, R: tl.constexpr):
+def _tree512(acc, R: tl.constexpr, descending: tl.constexpr = HAS_FUSED_RMS_NORM):
     """ATen's tree for `R` independent 512-lane fp32 reduces.
 
     Reduce.cuh vectorises to dim0 = 512/4 = 128, block_width = 32, so lane t
     owns elements 4t+i with i in 0..3 and walks stride 128; the four accumulators
-    are chained and block_x_reduce is shfl_down with offsets 1,2,4,8,16, i.e.
-    five adjacent-pair levels.
+    are chained. PyTorch 2.7 shuffles adjacent lanes first, while
+    PyTorch 2.14 starts with lanes 16 apart.
     """
     a = tl.reshape(acc, (R, 32, 2, 2))
     p, q = tl.split(a)
     a0, a2 = tl.split(p)
     a1, a3 = tl.split(q)
     v = _add_rn(_add_rn(_add_rn(a0, a1), a2), a3)
+    if descending:
+        # ATen 2.14 combines opposite halves of the warp first.
+        for shift in tl.static_range(5):
+            idx = tl.broadcast_to((tl.arange(0, 32) ^ (16 >> shift))[None, :], (R, 32))
+            v = _add_rn(v, tl.gather(v, idx, axis=1))
+        return tl.sum(tl.where(tl.arange(0, 32)[None, :] == 0, v, 0.), axis=1)
     v = tl.reshape(v, (R, 16, 2))
     lo, hi = tl.split(v)
     v = _add_rn(lo, hi)
@@ -353,6 +360,8 @@ def fast_encoder_forward(self, src, train_size=None, idempotency_loop_counts=Non
     rows = B * T
     if (
         not src.is_cuda or D not in (256, 512) or not rows
+        or (HAS_FUSED_RMS_NORM and rows < 16)  # ATen uses a wider reduction block for very few rows.
+        or slots > 16  # mix_k holds at most sixteen residual slots.
         or rows * slots * D >= 2**31
         or idempotency_loop_counts is not None or return_last_attn
         or not _bank_fits(rows, slots, D, src.device)
@@ -390,6 +399,8 @@ def fast_encoder_forward_with_cache(self, src, icl_cache, train_size=None,
     rows = B * T
     if (
         not src.is_cuda or D not in (256, 512) or not rows
+        or (HAS_FUSED_RMS_NORM and rows < 16)  # ATen uses a wider reduction block for very few rows.
+        or slots > 16  # mix_k holds at most sixteen residual slots.
         or rows * slots * D >= 2**31
         or cache_only
         or not _bank_fits(rows, slots, D, src.device)

@@ -458,6 +458,7 @@ class MultiheadAttentionBlock(nn.TransformerEncoderLayer):
         rope: Optional[RotaryEmbedding] = None,
         need_kv: bool = False,
         need_weights: bool = False,
+        out: Optional[Tensor] = None,
     ) -> Union[Tensor, Tuple[Tensor, ...]]:
         """Process input through attention.
 
@@ -564,7 +565,8 @@ class MultiheadAttentionBlock(nn.TransformerEncoderLayer):
                     attn = attn_result
 
             x = q + self.post_attn_norm(attn)
-            x = x + self.post_ff_norm(self._ff_block(self.norm2(x)))
+            ff = self.post_ff_norm(self._ff_block(self.norm2(x)))
+            x = torch.add(x, ff, out=out)
         else:
             # Post-norm: attention first, then normalize
             if use_cache:
@@ -586,6 +588,8 @@ class MultiheadAttentionBlock(nn.TransformerEncoderLayer):
 
             x = self.norm1(q + attn)
             x = self.norm2(x + self._ff_block(x))
+            if out is not None:
+                x = out.copy_(x)
 
         if need_kv and k_proj is not None:
             return x, k_proj, v_proj
@@ -854,6 +858,13 @@ class InducedSelfAttentionBlock(nn.Module):
 
         return out
 
+    def replay_cached(self, src: Tensor, entry: KVCacheEntry, out: Optional[Tensor] = None) -> Tensor:
+        """Apply cached inducing attention and restore padding before reusing the buffer."""
+        # Compute the mask before writing the residual when src and out alias.
+        skip_mask = (src == self.skip_value).all(dim=(-2, -1))
+        result = self.multihead_attn2(src, cached_kv=entry, out=out)
+        return result.masked_fill_(skip_mask[..., None, None], self.skip_value)
+
     def forward_with_cache(
         self,
         src: Tensor,
@@ -901,6 +912,13 @@ class InducedSelfAttentionBlock(nn.Module):
 
         # When using cache, we need consistent batch dimensions, so we don't apply skip_mask
         # The cache was populated with the full batch shape
+        if (
+            use_cache and src.is_cuda and src.numel() and not torch.is_grad_enabled()
+            and block_idx in col_cache.kv and col_cache.kv[block_idx].is_valid()
+        ):
+            # Keep the skip decision on device. Reading all()/any() in Python
+            # synchronizes every interleaved column block with the host.
+            return self.replay_cached(src, col_cache.kv[block_idx])
         skip_mask = (src == self.skip_value).all(dim=(-2, -1))
         if skip_mask.all():
             return torch.full_like(src, self.skip_value)

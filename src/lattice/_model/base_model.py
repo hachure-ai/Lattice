@@ -30,11 +30,11 @@ def stage_on_device(module: nn.Module, device: torch.device):
     correct (at the cost of running that stage on the host), which is the
     behaviour a user asking for an offloaded inference expects.
     """
-    params = [p for p in module.parameters()]
-    if not params:
+    first_param = next(module.parameters(), None)
+    if first_param is None:
         yield
         return
-    origin = params[0].device
+    origin = first_param.device
     if origin == device:
         yield
         return

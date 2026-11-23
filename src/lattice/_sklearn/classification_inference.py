@@ -11,19 +11,19 @@ from .adaptive_batching import predict
 
 
 def aggregate_scores(outputs, shuffles, *, average_logits, temperature, return_logits=False):
-    """Undo label permutations and preserve the previous member addition order.
+    """Align all member class permutations and average on the execution device.
 
     With ``return_logits`` the pre-softmax ensemble average is returned when
     members were averaged as logits; otherwise the returned scores are
     log-probabilities.
     """
-    average = torch.zeros_like(outputs[0], dtype=torch.float32)
-    for output, shuffle in zip(outputs, shuffles, strict=True):
-        if shuffle is not None:
-            indices = torch.as_tensor(shuffle, device=outputs.device)
-            output = output.index_select(-1, indices)
-        average.add_(output)
-    average.div_(len(outputs))
+    if len(shuffles) != len(outputs):
+        raise ValueError("Expected one class permutation per ensemble member")
+    classes = outputs.shape[-1]
+    indices = np.stack([np.arange(classes) if shuffle is None else shuffle for shuffle in shuffles])
+    indices = torch.as_tensor(indices, device=outputs.device)
+    aligned = outputs.gather(-1, indices[:, None, :].expand_as(outputs))
+    average = aligned.mean(dim=0, dtype=torch.float32)
     if not average_logits:
         average = average / average.sum(dim=-1, keepdim=True)
         if return_logits:

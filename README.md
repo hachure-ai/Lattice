@@ -20,23 +20,32 @@ cd Lattice
 pip install -e .
 ```
 
-Python >= 3.10 and PyTorch >= 2.4 are required (`F.rms_norm` needs 2.4). A CUDA
-GPU is strongly recommended; CPU inference works but is much slower.
+Lattice requires Python >= 3.10 and PyTorch >= 2.9.0. Both CPU and CUDA
+inference are supported. For GPU inference on Linux, install a CUDA build of
+PyTorch and run `pip install -e ".[fast]"` to include Triton. The CUDA
+benchmarks used PyTorch 2.14.1+cu130 and Triton 3.8.0.
 
-The optional accelerators are stricter and fall back silently when unmet: the
-Triton fast path needs exactly `torch==2.7.1` and `triton==3.3.1`; Flash
-Attention 3 needs a Hopper GPU (sm90), CUDA >= 12.3 and a
+On first use, the CUDA inference fast path compares Triton residual scores and
+scales against native PyTorch on the inference GPU. CUDA builds exposing
+`aten::_fused_rms_norm` also qualify for accelerated block input LayerNorm,
+head-wise Q/K RMSNorm and SwiGLU. The encoder checks representative LayerNorm
+and SwiGLU outputs on these builds and falls back to PyTorch if its checks fail.
+Q/K fusion has a separate numerical check when requested. Results are cached
+in the process, with encoder checks specific to the GPU and model width. On
+the RTX PRO 6000 Blackwell, PyTorch 2.9.0 with Triton 3.5.0 uses the native
+encoder after these checks.
+On the vectorized path, KV-cached models also pack the SwiGLU gate and up
+weights for one projection and reuse a row-major buffer for interleaved blocks.
+Flash Attention 3 needs a Hopper GPU (sm90), CUDA >= 12.3 and a
 `flash_attn_interface` built from the `hopper/` sources of FlashAttention.
 
-`pip install -e ".[fast]"` installs the validated Triton stack.
-
-Environment variables that control the accelerators (all optional):
+The following environment variables control CUDA inference.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `LATTICE_FASTPATH` | `auto` | `0`/`off` disables the Triton QK + ICL kernels entirely; `auto` installs them when the version gate above holds. |
-| `LATTICE_FASTPATH_KV` | `1` | `0`/`off` keeps a KV-cached fit on the eager encoder. By default a cached fit installs the encoder kernel only: the QK/RoPE rewiring belongs to the uncached path. |
-| `LATTICE_FUSED` | `0` | `1` additionally fuses LayerNorm, RMSNorm and SwiGLU. Off by default because the fused kernels need a device self-test at install time. |
+| `LATTICE_FASTPATH` | `auto` | `0`/`off` disables the model fast path. `auto` selects kernels for supported CUDA inference models after the numerical checks. |
+| `LATTICE_FASTPATH_KV` | `1` | `0`/`off` keeps a KV-cached fit on the eager encoder. Supported cached interleaved models also use fused Q/K and rotary embeddings under AMP. |
+| `LATTICE_FUSED` | `0` | `1` requests additional fusions on the uncached AMP path after a device self-test, including opt-in SwiGLU on the legacy path. The vectorized block input, Q/K and SwiGLU kernels use `LATTICE_FASTPATH`. |
 | `LATTICE_TEST_CHUNK_CELLS` | `2000000` | Cell budget (`rows x features`) of one cached test forward, the main prediction-time memory knob. |
 
 ## Quick start

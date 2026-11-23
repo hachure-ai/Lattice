@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Union, Literal
 from collections import OrderedDict
+from functools import lru_cache
 import math
 
 import torch
@@ -17,6 +18,16 @@ from .encoders import SetTransformer
 from .kv_cache import KVCache
 from .inference import InferenceManager
 from .inference_config import MgrConfig, InferenceConfig
+
+
+@lru_cache(maxsize=32)
+def _group_columns(width, size, device, stream_id):
+    # Same circular order as the original stack, shared by values, ranks and masks.
+    # Build an ordinary index tensor so a subsequent grad-enabled call can reuse it.
+    with torch.inference_mode(False):
+        columns = torch.arange(width, dtype=torch.long, device=device)
+        offsets = columns.new_tensor([2**i for i in range(size)])
+        return ((columns[:, None] + offsets) % width).flatten()
 
 
 class ColEmbedding(nn.Module):
@@ -244,8 +255,9 @@ class ColEmbedding(nn.Module):
 
         if mode == "same":
             # Group through circular permutation
-            idxs = torch.arange(H, dtype=torch.long, device=X.device)
-            X = torch.stack([X[:, :, (idxs + 2**i) % H] for i in range(size)], dim=-1)
+            stream_id = torch.cuda.current_stream(X.device).cuda_stream if X.is_cuda else None
+            indices = _group_columns(H, size, X.device, stream_id)
+            X = X.index_select(-1, indices).reshape(B, T, H, size)
         else:
             # Group through padding and reshaping
             x_pad_cols = (size - H % size) % size
@@ -263,16 +275,16 @@ class ColEmbedding(nn.Module):
         an arbitrary number of query cells against the same distribution.
         """
         n = X_support.shape[1]
-        sorted_train = X_support.transpose(1, 2).sort(dim=-1).values  # (B, H, n)
+        sorted_train = X_support.transpose(1, 2).contiguous().sort(dim=-1).values  # (B, H, n)
         mid_lo = (
             0.5
-            * torch.searchsorted(sorted_train, sorted_train[:, :, :1], right=True).to(X_support.dtype)
+            * torch.searchsorted(sorted_train, sorted_train[:, :, :1].contiguous(), right=True).to(X_support.dtype)
             / n
         )
         mid_hi = (
             0.5
             * (
-                torch.searchsorted(sorted_train, sorted_train[:, :, -1:], right=False).to(X_support.dtype)
+                torch.searchsorted(sorted_train, sorted_train[:, :, -1:].contiguous(), right=False).to(X_support.dtype)
                 + n
             )
             / n
@@ -283,7 +295,7 @@ class ColEmbedding(nn.Module):
         """Per-cell midrank of ``X`` against precomputed support statistics."""
         sorted_train = stats["sorted"]
         n = sorted_train.shape[-1]
-        values = X.transpose(1, 2)  # (B, H, T)
+        values = X.transpose(1, 2).contiguous()  # (B, H, T), reused for both searches
         below = torch.searchsorted(sorted_train, values, right=False).to(X.dtype)
         at_most = torch.searchsorted(sorted_train, values, right=True).to(X.dtype)
         ranks = 0.5 * (below + at_most) / n

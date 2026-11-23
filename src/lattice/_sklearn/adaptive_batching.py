@@ -213,15 +213,15 @@ def _predict_members(
     support = 0 if y is None else y.shape[1]
     query = X.shape[1] - support
     outputs = []
-    staged = (
-        staged_cache
-        if staged_cache is not None
-        else (
-            cache.slice_batch(offset, end).to(estimator.device_)
-            if cache is not None
-            else None
-        )
-    )
+    staged = staged_cache
+    if staged is None and cache is not None:
+        staged = cache if offset == 0 and end == cache.train_shape[0] else cache.slice_batch(offset, end)
+        cache_device = next(staged.tensors()).device
+        target_device = estimator.device_
+        if target_device.type == "cuda" and target_device.index is None:
+            target_device = torch.device("cuda", torch.cuda.current_device())
+        if cache_device != target_device:
+            staged = staged.to(estimator.device_)
     target = (
         None
         if y is None
@@ -229,7 +229,9 @@ def _predict_members(
     )
     for start in range(0, query, rows):
         values = X[:, support + start : support + start + rows]
-        if cache is None:
+        if cache is None and start == 0 and rows >= query:
+            values = X
+        elif cache is None:
             blocks = (X[:, :support], values)
             values = (
                 torch.cat(blocks, dim=1)
@@ -290,6 +292,8 @@ def _predict_members(
         outputs.append(
             output.float() if return_tensor else output.float().cpu().numpy()
         )
+    if len(outputs) == 1:
+        return outputs[0]
     return (
         torch.cat(outputs, dim=1) if return_tensor else np.concatenate(outputs, axis=1)
     )
@@ -387,6 +391,8 @@ def predict(
     estimator.batching_info_[-1]["cache_resident"] = cache is not None and on_cuda(
         cache
     )
+    if len(outputs) == 1:
+        return outputs[0]
     return (
         torch.cat(outputs, dim=0) if return_tensor else np.concatenate(outputs, axis=0)
     )
