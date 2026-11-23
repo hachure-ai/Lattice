@@ -352,6 +352,36 @@ class InterleavedRowInteraction(nn.Module):
 
         return self.out_ln(cls).flatten(-2)  # (B, T, C*E)
 
+    def _buffered_query(self, embeddings: Tensor, col_cache: KVCache, budget: int) -> Tensor:
+        """Reuse one row-major token buffer across cached column and row blocks."""
+        batch, rows, tokens, dim = embeddings.shape
+        groups = tokens - self.num_cls
+        col_step = _chunk_len(groups, rows, budget, batch)
+        row_step = _chunk_len(rows, tokens, budget, batch)
+        workspace = embeddings.new_empty((batch, rows, tokens, dim))
+        workspace[:, :, :self.num_cls].copy_(self.cls_tokens)
+        features = embeddings[:, :, self.num_cls:]
+        destination = workspace[:, :, self.num_cls:]
+        readout = embeddings.new_empty((batch, rows, self.num_cls, dim))
+
+        for i, (col, row) in enumerate(zip(self.col_blocks, self.row_blocks)):
+            entry = col_cache.kv[i]
+            for g in range(0, groups, col_step):
+                span = slice(g, g + col_step)
+                kv = entry if col_step == groups else entry[:, span]
+                col.replay_cached(features[:, :, span].transpose(1, 2), kv,
+                                  out=destination[:, :, span].transpose(1, 2))
+            features = destination
+            for t in range(0, rows, row_step):
+                span = slice(t, t + row_step)
+                chunk = workspace[:, span]
+                if i == self.num_blocks - 1:
+                    row(q=chunk[:, :, :self.num_cls], k=chunk, v=chunk,
+                        rope=self._attention_rope, out=readout[:, span])
+                else:
+                    row(chunk, rope=self._attention_rope, out=chunk)
+        return self.out_ln(readout).flatten(-2)
+
     def forward_with_cache(self, embeddings, col_cache, *, train_size=None, use_cache=False, store_cache=True):
         """Reuse each interleaved column block's support-side inducing states."""
         if use_cache == store_cache or (store_cache and train_size is None):
@@ -362,6 +392,15 @@ class InterleavedRowInteraction(nn.Module):
         last = self.num_blocks - 1
         budget = _cell_budget()
         chunked = budget > 0 and not torch.is_grad_enabled()
+        if (use_cache and chunked and not self.training and embeddings.is_cuda
+                and embeddings.dtype == torch.float32 and embeddings.numel()
+                and embeddings.shape[2] > self.num_cls and getattr(self, "_shared_query_tokens", False)
+                and all(i in col_cache.kv and col_cache.kv[i].is_valid() for i in range(self.num_blocks))):
+            try:
+                return self._buffered_query(embeddings, col_cache, budget)
+            except torch.cuda.OutOfMemoryError:
+                # The chunked path below can run without a full row-major buffer.
+                pass
         if chunked:
             cls = cls.contiguous()
         for i, (col, row) in enumerate(zip(self.col_blocks, self.row_blocks)):

@@ -104,6 +104,7 @@ class LatticeEncoder:
         self.numeric_indices_ = np.flatnonzero(~cat)
         self.category_indices_ = np.flatnonzero(cat)
         self.ordinal_ = None
+        self.category_levels_ = None
         self.counts_ = []
         self.code_cols_ = []
         self.onehot_ = []
@@ -126,6 +127,11 @@ class LatticeEncoder:
                 encoded_missing_value=-1,
             )
             codes = self.ordinal_.fit_transform(array[:, cat]).astype(np.int64)
+            if hasattr(X, "iloc"):
+                import pandas as pd
+                self.category_levels_ = [
+                    pd.Index(levels[~pd.isna(levels)]) for levels in self.ordinal_.categories_
+                ]
             for j, categories in enumerate(self.ordinal_.categories_):
                 # NaN is not part of AlignCategories' fitted vocabulary.
                 n = len(categories) - int(
@@ -136,6 +142,11 @@ class LatticeEncoder:
                 )
                 if self.max_missing_indicators and (codes[:, j] < 0).any():
                     self.miss_cat_.append(j)
+                # A binary feature needs one slot. The ordinal sentinel also
+                # preserves the distinction between the first level and unseen data.
+                if n == 2 and self.onehot_width and n <= self.max_onehot_card:
+                    self.code_cols_.append(j)
+                    continue
                 if n <= self.max_onehot_card:
                     self.onehot_.append((j, n))
                     continue
@@ -145,11 +156,16 @@ class LatticeEncoder:
                         np.where(codes[:, j] >= 0, codes[:, j], n), minlength=n + 1
                     )
                     self.counts_.append((j, n, np.log1p(counts.astype(np.float64))))
-            if sum(n for _, n in self.onehot_) > self.onehot_width:
+            # Keep wide categorical tables on a compact ordinal representation
+            # when indicators alone would triple the original token count.
+            onehot_width = self.onehot_width
+            if width >= 32 and sum(n for _, n in self.onehot_) > 3 * width:
+                onehot_width = 0
+            if sum(n for _, n in self.onehot_) > onehot_width:
                 # Width budget: keep the cheapest blocks, code the rest.
                 keep, used = [], 0
                 for j, n in sorted(self.onehot_, key=lambda t: (t[1], t[0])):
-                    if used + n <= self.onehot_width:
+                    if used + n <= onehot_width:
                         keep.append((j, n))
                         used += n
                     else:
@@ -188,16 +204,30 @@ class LatticeEncoder:
         return self
 
     def transform(self, X):
-        array = self._array(X)
-        if array.shape[1] != self.n_features_in_:
+        if getattr(X, "ndim", None) == 2 and X.shape[1] != self.n_features_in_:
             raise ValueError("Query feature count differs from fit")
-        numeric = array[:, self.numeric_indices_].astype(np.float64)
+        frame = hasattr(X, "iloc") and hasattr(X, "to_numpy")
+        levels = getattr(self, "category_levels_", None)
+        if frame and (self.ordinal_ is None or levels is not None):
+            values = X if self.ordinal_ is None else X.iloc[:, self.numeric_indices_]
+            numeric = values.to_numpy(dtype=np.float64, na_value=np.nan)
+            if self.ordinal_ is not None:
+                codes = np.column_stack([
+                    vocab.get_indexer(X.iloc[:, column])
+                    for column, vocab in zip(self.category_indices_, levels, strict=True)
+                ])
+        else:
+            array = self._array(X)
+            if array.shape[1] != self.n_features_in_:
+                raise ValueError("Query feature count differs from fit")
+            numeric = array[:, self.numeric_indices_].astype(np.float64)
+            if self.ordinal_ is not None:
+                codes = self.ordinal_.transform(array[:, self.category_indices_])
         parts = [numeric]
         if self.miss_numeric_.any():
             parts.append(np.isnan(numeric[:, self.miss_numeric_]).astype(np.float64))
         if self.ordinal_ is None:
-            return np.concatenate(parts, axis=1)
-        codes = self.ordinal_.transform(array[:, self.category_indices_])
+            return parts[0] if len(parts) == 1 else np.concatenate(parts, axis=1)
         if self.counts_:
             parts.append(
                 np.column_stack(
@@ -210,7 +240,7 @@ class LatticeEncoder:
         if self.code_cols_:
             parts.append(codes[:, self.code_cols_])
         for j, n in self.onehot_:
-            block = np.zeros((len(array), n))
+            block = np.zeros((len(numeric), n))
             valid = codes[:, j]
             keep = (valid >= 0) & (valid < n)
             block[np.flatnonzero(keep), valid[keep].astype(np.int64)] = 1.0
@@ -281,7 +311,7 @@ class LatticeEnsembleGenerator:
             X = torch.as_tensor(X, dtype=torch.float64, device=self.device)
         self.preprocessors_, self.numeric_support_ = {}, {}
         self.base_masks_, self.sign_masks_, self.fill_ = {}, {}, {}
-        for method in self.methods[: min(len(self.methods), self.n_estimators)]:
+        for method in dict.fromkeys(self.methods[:self.n_estimators]):
             blocks, masks, sign_masks = [], [], []
             for categorical in (False, True):
                 route = self.category_route == categorical
@@ -453,12 +483,16 @@ class LatticeEnsembleGenerator:
         return state
 
     def _query(self, X, method):
-        parts = [
-            self.preprocessors_[method, cat].transform(X[:, self.category_route == cat])
-            for cat in (False, True)
-        ]
+        parts = []
+        for cat in (False, True):
+            route = self.category_route == cat
+            if route.any():
+                block = X if route.all() else X[:, np.flatnonzero(route)]
+                parts.append(self.preprocessors_[method, cat].transform(block))
+        if not parts:
+            return X.new_zeros((len(X), 1)) if isinstance(X, torch.Tensor) else np.zeros((len(X), 1))
         if getattr(self, "tensor_output", False):
-            values = torch.cat(parts, dim=1)
+            values = parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
             return values if values.shape[1] else values.new_zeros((len(X), 1))
         values = np.concatenate(parts, axis=1)
         return values if values.shape[1] else np.zeros((len(X), 1))
@@ -497,15 +531,10 @@ class LatticeEnsembleGenerator:
             sample = next(iter(prepared.values()))
             configs = getattr(self, "_device_member_configs", None)
             if configs is None or configs[0][0].device != sample.device:
-                configs = [
-                    (
-                        torch.as_tensor(signs, device=sample.device),
-                        torch.as_tensor(permutation, device=sample.device),
-                    )
-                    for signs, (permutation, _) in zip(
-                        self.signs_, self.ensemble_configs_["lattice"]
-                    )
-                ]
+                permutations = [p for p, _ in self.ensemble_configs_["lattice"]]
+                signs = torch.as_tensor(np.stack(self.signs_), device=sample.device)
+                indices = torch.as_tensor(np.stack(permutations), device=sample.device)
+                configs = list(zip(signs.unbind(), indices.unbind()))
                 self._device_member_configs = configs
             features = torch.empty(
                 (self.n_estimators, sample.shape[0], len(configs[0][1])),

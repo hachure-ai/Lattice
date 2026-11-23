@@ -158,7 +158,6 @@ class HybridFourierFeatureEmbedding(nn.Module):
             )
 
         skip_mask = (src == self.skip_value).all(dim=-1)
-        numerical = self._numerical_features(src)
 
         if self.embedding_style == "typed_sum_ecdf_ln":
             if cat_mask is not None and cat_mask.shape[-1] != self.in_features:
@@ -166,22 +165,18 @@ class HybridFourierFeatureEmbedding(nn.Module):
                     f"Expected categorical mask width {self.in_features}, "
                     f"got {cat_mask.shape[-1]}."
                 )
-            categorical = self._numerical_features(
-                src, self.categorical_frequencies
-            )
-            numerical_out = self.numerical_projection(numerical)
-            categorical_out = self.categorical_projection(categorical)
             if cat_mask is None:
-                selected_out = numerical_out
+                selected_out = self.numerical_projection(self._numerical_features(src))
             else:
+                mask = cat_mask.bool().unsqueeze(-1)
+                frequencies = torch.where(mask, self.categorical_frequencies, self.frequencies)
+                features = self._numerical_features(src, frequencies)
                 selected_out = torch.where(
-                    cat_mask.bool().unsqueeze(-1),
-                    categorical_out,
-                    numerical_out,
+                    mask, self.categorical_projection(features), self.numerical_projection(features)
                 )
             out = selected_out.sum(dim=-2)
         elif cat_mask is None or not self.separate_categorical:
-            selected = numerical
+            selected = self._numerical_features(src)
             out = self.projection(selected.flatten(start_dim=-2))
         else:
             if cat_mask.shape[-1] != self.in_features:
@@ -189,6 +184,7 @@ class HybridFourierFeatureEmbedding(nn.Module):
                     f"Expected categorical mask width {self.in_features}, "
                     f"got {cat_mask.shape[-1]}."
                 )
+            numerical = self._numerical_features(src)
             categorical = self._categorical_features(src)
             selected = torch.where(
                 cat_mask.bool().unsqueeze(-1),
@@ -210,8 +206,4 @@ class HybridFourierFeatureEmbedding(nn.Module):
             out = out + self.metadata_linear(metadata)
         if self.embedding_style == "typed_sum_ecdf_ln":
             out = self.output_layernorm(out)
-        return torch.where(
-            skip_mask.unsqueeze(-1),
-            out.new_tensor(self.skip_value),
-            out,
-        )
+        return out.masked_fill(skip_mask.unsqueeze(-1), self.skip_value)

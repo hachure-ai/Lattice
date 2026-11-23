@@ -96,7 +96,7 @@ _CKPT_CACHE_MAX = 2
 
 
 def _torch_load_checkpoint(path):
-    """Read a checkpoint with memory mapping (requires the supported torch>=2.4).
+    """Read a checkpoint with memory mapping.
 
     Repeated ``fit`` calls on the same file (one per dataset in an evaluation
     harness) would otherwise re-read and re-deserialise the archive every time
@@ -254,8 +254,6 @@ class LatticeBaseEstimator(BaseEstimator):
         )
         self.model_.eval()
 
-    fastpath_min_rows = 1_024
-
     def _maybe_install_fastpath(self, n_rows: int) -> bool:
         """Select QK + ICL under AMP and ICL alone for FP32.
 
@@ -277,9 +275,8 @@ class LatticeBaseEstimator(BaseEstimator):
             return False
 
         use_amp = getattr(self, "_use_amp_resolved", False)
-        # A KV-cached fit builds and serves on ``forward_with_cache``, so it gets
-        # the encoder kernel only; the QK/RoPE rewiring belongs to the uncached
-        # path. ``LATTICE_FASTPATH_KV=0`` opts a cached fit out of the extension.
+        # The interleaved row stack honors its fused RoPE flag on both paths.
+        # Other cached implementations may pass their rotary embedding directly.
         kv = bool(self.kv_cache) and os.environ.get("LATTICE_FASTPATH_KV", "1").lower() not in {
             "0", "off", "false", "disabled",
         }
@@ -289,7 +286,6 @@ class LatticeBaseEstimator(BaseEstimator):
             and self.device_.type == "cuda"
             # A cached fit has no use for the uncached encoders.
             and (kv or not self.kv_cache)
-            and (kv or not (use_amp and n_rows < self.fastpath_min_rows))
         )
         if not selected:
             if getattr(self, "model_", None) is not None:
@@ -299,7 +295,7 @@ class LatticeBaseEstimator(BaseEstimator):
         try:
             with torch.no_grad():
                 self.fastpath_enabled_ = fastpath.install(
-                    self.model_, fuse_qk=use_amp and not kv, allow_kv_cache=kv,
+                    self.model_, fuse_qk=use_amp, allow_kv_cache=kv,
                 )
         except RuntimeError:
             return False
@@ -400,7 +396,10 @@ class LatticeBaseEstimator(BaseEstimator):
             return None
         generator = self.ensemble_generator_
         if hasattr(generator, "categorical_masks_"):
-            return generator.categorical_masks_[key]
+            masks = generator.categorical_masks_[key]
+            if not masks.any():
+                return None
+            return masks
         keep = generator.unique_filter_.features_to_keep_
         mask = self.X_encoder_.categorical_mask_[keep]
         permutations = generator.feature_shuffles_[key]

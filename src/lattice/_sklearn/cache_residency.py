@@ -29,7 +29,7 @@ def place_caches(estimator):
 
     Include already-resident KV in the budget to avoid alternating placement on
     consecutive calls. The remainder is reserved for query data and activations.
-    Promotion happens only in fit/predict, never as a side effect of loading.
+    Callers can also restore the fitted cache when preparing a model to serve.
     """
     caches = estimator.model_kv_cache_
     total = sum(cache.size_bytes() for cache in caches.values())

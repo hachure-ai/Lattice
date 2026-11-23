@@ -177,7 +177,9 @@ class LatticeNumericView:
 
     @torch.no_grad()
     def transform(self, X):
-        x = self._tensor(X)[:, self.keep_]
+        x = self._tensor(X)
+        if not self.keep_.all():
+            x = x[:, np.flatnonzero(self.keep_)]
         z = ((x - self.mean_) / self.scale_).clamp(-100, 100)
         values = self._clip(self._distribution(z))
         return values if getattr(self, "tensor_output", False) else values.cpu().numpy()

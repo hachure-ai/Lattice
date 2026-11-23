@@ -1,8 +1,7 @@
-"""Fused LayerNorm / RMSNorm / SwiGLU kernels for half-precision CUDA inference.
+"""Fused LayerNorm / RMSNorm / SwiGLU kernels for CUDA inference.
 
-The kernels mirror the eager reference (fp32 statistics, affine in fp32, output
-cast back to fp16) but avoid the autocast round trips that materialise fp32
-copies of every normalized tensor.
+Normalization computes statistics and affine transforms in fp32. The SwiGLU
+kernel rounds the activation to the projection dtype before multiplying.
 """
 
 import os
@@ -12,6 +11,9 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
+from triton.language.extra.cuda import libdevice
+
+from ._fast_norm214 import HAS_FUSED_RMS_NORM
 
 
 def _disabled() -> bool:
@@ -57,18 +59,25 @@ def _rms_norm_kernel(x, w, out, rows, D: tl.constexpr, eps: tl.constexpr,
     tl.store(out + offset, value, mask=valid)
 
 
-@triton.jit
-def _swiglu_kernel(gate, up, out, rows, H: tl.constexpr, BH: tl.constexpr,
-                   BR: tl.constexpr):
-    row = tl.program_id(0) * BR + tl.arange(0, BR)
-    cols = tl.arange(0, BH)
-    valid = (row[:, None] < rows) & (cols[None, :] < H)
-    offset = row[:, None].to(tl.int64) * H + cols[None, :]
-    g = tl.load(gate + offset, mask=valid, other=0.0).to(tl.float32)
-    u = tl.load(up + offset, mask=valid, other=0.0).to(tl.float32)
-    # Match eager fp16: round silu(gate) to fp16, then multiply by up.
-    s = (g * tl.sigmoid(g)).to(tl.float16).to(tl.float32)
-    tl.store(out + offset, s * u, mask=valid)
+@triton.jit(do_not_specialize=["elements"])
+def _swiglu_kernel(gate, up, out, elements, BLOCK: tl.constexpr, NATIVE_SILU: tl.constexpr,
+                   PACKED_WIDTH: tl.constexpr = 0):
+    offset = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    valid = offset < elements
+    src = offset
+    if PACKED_WIDTH:
+        # [row, gate | up]: load both halves without making contiguous copies.
+        src = offset + (offset // PACKED_WIDTH) * PACKED_WIDTH
+    g = tl.load(gate + src, mask=valid, other=0.).to(tl.float32)
+    u = tl.load(up + src + PACKED_WIDTH, mask=valid, other=0.).to(tl.float32)
+    if NATIVE_SILU:
+        # ATen SiLU divides by 1 + expf(-x). Multiplying by sigmoid instead
+        # changes which side of a half-precision rounding boundary x lands on.
+        activation = tl.div_rn(g, 1.0 + libdevice.exp(-g))
+    else:
+        activation = g * tl.sigmoid(g)
+    rounded = activation.to(gate.dtype.element_ty).to(tl.float32)
+    tl.store(out + offset, rounded * u, mask=valid)
 
 
 def _dims(dim: int) -> bool:
@@ -120,23 +129,25 @@ def fused_rms_norm(x, weight, eps: float):
 
 def fused_swiglu(gate, up):
     """Return ``silu(gate) * up`` fused, or ``None`` when unsupported."""
-    if _disabled() or gate is None or up is None:
+    if torch.is_grad_enabled() or gate is None or up is None:
         return None
-    if not gate.is_cuda or gate.dtype != torch.float16 or up.dtype != torch.float16:
+    if not gate.is_cuda or up.device != gate.device or up.dtype != gate.dtype:
         return None
-    if gate.shape != up.shape or not gate.is_contiguous() or not up.is_contiguous():
+    if not gate.numel() or gate.shape != up.shape or not gate.is_contiguous() or not up.is_contiguous():
         return None
-    hidden = gate.shape[-1]
-    if not _dims(hidden) or gate.numel() == 0:
+    if HAS_FUSED_RMS_NORM:
+        if gate.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            return None
+    elif _disabled() or gate.dtype != torch.float16 or gate.ndim == 0 or not _dims(gate.shape[-1]):
         return None
-    rows = gate.numel() // hidden
-    flat_gate = gate.view(rows, hidden)
-    flat_up = up.view(rows, hidden)
-    out = torch.empty_like(flat_gate)
-    _swiglu_kernel[(triton.cdiv(rows, 8),)](
-        flat_gate, flat_up, out, rows, hidden, hidden, 8, num_warps=_warps(hidden)
-    )
-    return out.view_as(gate)
+
+    out = torch.empty_like(gate)
+    block = 512
+    with torch.cuda.device(gate.device):
+        _swiglu_kernel[(triton.cdiv(gate.numel(), block),)](
+            gate, up, out, gate.numel(), BLOCK=block, NATIVE_SILU=HAS_FUSED_RMS_NORM, num_warps=4,
+        )
+    return out
 
 
 def fused_layer_norm_forward(self, x):
@@ -157,6 +168,45 @@ def fused_rms_norm_forward(self, x):
         self.weight.float(),
         eps,
     ).to(x.dtype)
+
+
+def pack_projection_pair(first, second, versions, placement, dtype):
+    """Pack immutable inference weights once for the active GEMM precision."""
+    return torch.cat((first, second), dim=0).to(dtype=dtype)
+
+
+def packed_projections(module, dtype):
+    gate, up = module.w_gate, module.w_up
+    params = (gate.weight, up.weight, gate.bias, up.bias)
+    if any(p is None or p.is_inference() or p.dtype == torch.float64 for p in params):
+        return None
+
+    def pair(a, b):
+        # load_state_dict, parameter replacement and device/dtype moves can
+        # each invalidate the packed copy during the lifetime of a shared model.
+        return module._pack_gate_up(a, b, (a._version, b._version), (a.device, a.dtype), dtype)
+
+    return pair(gate.weight, up.weight), pair(gate.bias, up.bias)
+
+
+def packed_swiglu_forward(self, x):
+    if self.training or torch.is_grad_enabled() or not x.is_cuda or not x.numel():
+        return fused_swiglu_forward(self, x)
+    if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        return fused_swiglu_forward(self, x)
+    dtype = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else self.w_gate.weight.dtype
+    projections = packed_projections(self, dtype)
+    if projections is None:
+        return fused_swiglu_forward(self, x)
+    projected = F.linear(x, *projections)
+    width = self.w_gate.out_features
+    out = projected.new_empty((*projected.shape[:-1], width))
+    with torch.cuda.device(projected.device):
+        _swiglu_kernel[(triton.cdiv(out.numel(), 256),)](
+            projected, projected, out, out.numel(), BLOCK=256, NATIVE_SILU=True,
+            PACKED_WIDTH=width, num_warps=4,
+        )
+    return self.w_down(self.dropout(out))
 
 
 def fused_swiglu_forward(self, x):
@@ -185,7 +235,7 @@ def install_fused(model, encoder, row_norms, replace) -> bool:
 
     norm_modules = []
     use_ln = _enabled("ln")
-    use_swiglu = _enabled("swiglu")
+    use_swiglu = not HAS_FUSED_RMS_NORM and _enabled("swiglu")
     use_rms = _enabled("rms")
     for module in model.modules():
         if isinstance(module, torch.nn.LayerNorm) and use_ln:
