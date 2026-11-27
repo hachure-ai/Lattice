@@ -1,6 +1,6 @@
 # Lattice
 
-Developed by **Hachure-AI & Nanjing University**.
+Developed by **Nanjing University & Hachure-AI**.
 
 Lattice is a tabular foundation model that makes predictions in context, without
 any fine-tuning. A single frozen model handles both classification and
